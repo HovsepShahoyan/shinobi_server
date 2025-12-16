@@ -259,6 +259,7 @@ class WebhookServer:
             
             return {"status": "ignored"}
         
+
         @app.post("/webhook/{camera_id}")
         async def receive_camera_webhook(
             camera_id: str,
@@ -280,6 +281,48 @@ class WebhookServer:
                 return {"status": "accepted"}
             
             return {"status": "ignored"}
+        
+        @app.post("/webhook/shinobi")
+        async def receive_shinobi_event(
+            request: Request,
+            background_tasks: BackgroundTasks
+        ):
+            """
+            Receive events FROM Shinobi NVR.
+            This endpoint receives motion events that Shinobi forwards to us.
+            """
+            try:
+                body = await request.body()
+                data = json.loads(body)
+                
+                logger.info("📥 Received event FROM Shinobi:")
+                logger.info(f"   Raw data: {json.dumps(data, indent=2)}")
+                
+                # Extract event information from Shinobi
+                monitor_id = data.get('plug') or data.get('mid') or data.get('camera_id', 'unknown')
+                event_name = data.get('name', 'Motion')
+                reason = data.get('reason', 'Shinobi event')
+                confidence = data.get('confidence', 100)
+                
+                # Log the event in a structured way
+                logger.info(f"🎥 SHINOBI EVENT RECEIVED:")
+                logger.info(f"   Monitor: {monitor_id}")
+                logger.info(f"   Event: {event_name}")
+                logger.info(f"   Reason: {reason}")
+                logger.info(f"   Confidence: {confidence}%")
+                logger.info(f"   Timestamp: {datetime.now().isoformat()}")
+                
+                # You can add custom processing here
+                # For example: save to database, trigger alerts, etc.
+                
+                return {"status": "received", "message": "Event logged successfully"}
+                
+            except json.JSONDecodeError:
+                logger.error("Invalid JSON received from Shinobi")
+                return {"status": "error", "message": "Invalid JSON"}
+            except Exception as e:
+                logger.error(f"Error processing Shinobi event: {e}")
+                return {"status": "error", "message": str(e)}
         
         @app.post("/test/{camera_id}/{event_type}")
         async def test_event(
