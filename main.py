@@ -104,6 +104,7 @@ class CameraSystem:
         
         return manager
 
+
     def _init_webhook_server(self) -> WebhookServer:
         """Initialize FastAPI webhook server"""
         webhook_cfg = self.config.get('webhook', {})
@@ -119,12 +120,19 @@ class CameraSystem:
             if 'channel' in cam:
                 camera_mapping[str(cam['channel'])] = cam['id']
         
+        # Configure external receiver URL for event forwarding
+        external_receiver = webhook_cfg.get('external_receiver_url')
+        if not external_receiver:
+            # Default to our FastAPI receiver on port 8766
+            external_receiver = "http://localhost:8766"
+        
         return WebhookServer(
             shinobi_client=self.shinobi,
             host=webhook_cfg.get('host', '0.0.0.0'),
             port=webhook_cfg.get('port', 8765),
             webhook_secret=webhook_cfg.get('secret'),
-            camera_mapping=camera_mapping
+            camera_mapping=camera_mapping,
+            external_receiver_url=external_receiver
         )
 
     async def setup_cameras(self):

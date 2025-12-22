@@ -116,18 +116,21 @@ class WebhookServer:
     FastAPI-based webhook server for ONVIF events.
     """
     
+
     def __init__(
         self,
         shinobi_client: ShinobiClient,
         host: str = "0.0.0.0",
         port: int = 8765,
         webhook_secret: Optional[str] = None,
-        camera_mapping: Optional[Dict[str, str]] = None
+        camera_mapping: Optional[Dict[str, str]] = None,
+        external_receiver_url: Optional[str] = None
     ):
         self.shinobi = shinobi_client
         self.host = host
         self.port = port
         self.webhook_secret = webhook_secret
+        self.external_receiver_url = external_receiver_url
         
         # Map external camera IDs to Shinobi monitor IDs
         self.camera_mapping = camera_mapping or {}
@@ -282,6 +285,8 @@ class WebhookServer:
             
             return {"status": "ignored"}
         
+
+
         @app.post("/webhook/shinobi")
         async def receive_shinobi_event(
             request: Request,
@@ -312,8 +317,40 @@ class WebhookServer:
                 logger.info(f"   Confidence: {confidence}%")
                 logger.info(f"   Timestamp: {datetime.now().isoformat()}")
                 
-                # You can add custom processing here
-                # For example: save to database, trigger alerts, etc.
+                # Update our own statistics
+                self.stats["total_events"] += 1
+                self.stats["events_by_type"][event_name] = \
+                    self.stats["events_by_type"].get(event_name, 0) + 1
+                self.stats["events_by_camera"][monitor_id] = \
+                    self.stats["events_by_camera"].get(monitor_id, 0) + 1
+                self.stats["last_event_time"] = datetime.now().isoformat()
+                
+                # Forward to external webhook receiver if configured
+                receiver_url = getattr(self, 'external_receiver_url', None)
+                if receiver_url:
+                    background_tasks.add_task(self._forward_to_receiver, data, receiver_url)
+                
+                # Call registered callbacks
+                for callback in self.event_callbacks:
+                    try:
+                        if asyncio.iscoroutinefunction(callback):
+                            await callback(ONVIFWebhookEvent(
+                                camera_id=monitor_id,
+                                event_type=event_name.lower(),
+                                reason=reason,
+                                confidence=confidence,
+                                raw_data=data
+                            ))
+                        else:
+                            callback(ONVIFWebhookEvent(
+                                camera_id=monitor_id,
+                                event_type=event_name.lower(),
+                                reason=reason,
+                                confidence=confidence,
+                                raw_data=data
+                            ))
+                    except Exception as e:
+                        logger.error(f"Callback error: {e}")
                 
                 return {"status": "received", "message": "Event logged successfully"}
                 
@@ -566,6 +603,25 @@ class WebhookServer:
             raw_data=data
         )
     
+
+    async def _forward_to_receiver(self, event_data: Dict, receiver_url: str):
+        """Forward event to external webhook receiver"""
+        try:
+            import aiohttp
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{receiver_url}/webhook/shinobi",
+                    json=event_data,
+                    headers={"Content-Type": "application/json"},
+                    timeout=10
+                ) as resp:
+                    if resp.status == 200:
+                        logger.info(f"✅ Event forwarded to receiver: {receiver_url}")
+                    else:
+                        logger.warning(f"⚠️ Failed to forward to receiver: {resp.status}")
+        except Exception as e:
+            logger.error(f"❌ Error forwarding to receiver: {e}")
+
     async def _process_event(self, event: ONVIFWebhookEvent):
         """Process normalized event - forward to Shinobi with detection type as event name"""
         try:
@@ -618,6 +674,16 @@ class WebhookServer:
                 logger.debug(f"✅ Shinobi triggered: {event_name} for {event.camera_id}")
             else:
                 logger.warning(f"⚠️ Failed to trigger Shinobi for {event.camera_id}")
+            
+            # Forward to external receiver if configured
+            if self.external_receiver_url:
+                await self._forward_to_receiver({
+                    "plug": event.camera_id,
+                    "name": event_name,
+                    "reason": reason,
+                    "confidence": int(event.confidence),
+                    "raw_data": event.raw_data
+                }, self.external_receiver_url)
             
             # Call registered callbacks
             for callback in self.event_callbacks:
