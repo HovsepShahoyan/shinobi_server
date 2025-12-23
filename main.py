@@ -1,484 +1,498 @@
 #!/usr/bin/env python3
 """
-Camera Recording System with Webhook Support
+Camera Recording System - Simplified
 
-Complete flow:
-1. Shinobi records continuously (mode="record")
-2. Webhook server receives ONVIF events (person detection, car detection, etc.)
-3. Events trigger Shinobi motion API
-4. Recordings synced to local PC with temp/permanent separation
+This system:
+1. Receives webhook events (person, car, motion, etc.)
+2. Triggers events in Shinobi for timeline markers
+3. Saves event recordings to permanent_recordings/ (only when events occur)
 
-Supports two modes for event detection:
-- ONVIF PullPoint (legacy): Polls camera for events
-- Webhook Server (recommended): Receives HTTP events from camera/NVR
+Recordings are streamed directly from Shinobi via FastAPI - no local sync needed.
 
-Your PC has:
-├── temp_recordings/      ← All recordings, deleted after 1 hour
-│   ├── cam1/
-│   └── cam2/
-└── permanent_recordings/ ← Event recordings only, kept forever
-    ├── cam1/
-    │   └── 20240115_143022/  ← Event timestamp folder
-    │       ├── recording1.mp4
-    │       └── recording2.mp4
-    └── cam2/
+Run with: python3 main.py
 """
 
-import asyncio
-import json
-import sys
 import os
-from datetime import datetime
-from typing import Optional
+import sys
+import json
+import asyncio
+import shutil
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Dict, Optional
+from dataclasses import dataclass
 from loguru import logger
+import httpx
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 
-from shinobi_client import ShinobiClient
-from onvif_listener import ONVIFEventListener
-from webhook_server import WebhookServer, create_webhook_server, ONVIFWebhookEvent
+# Configure logging
+logger.remove()
+logger.add(
+    sys.stdout,
+    format="<green>{time:HH:mm:ss}</green> | <level>{level: <8}</level> | <level>{message}</level>",
+    level="INFO"
+)
 
-# Import LocalStorageManager if available
-try:
-    from local_storage import LocalStorageManager
-except ImportError:
-    LocalStorageManager = None
-    logger.warning("LocalStorageManager not available - local storage features disabled")
+
+@dataclass
+class CameraConfig:
+    id: str
+    name: str
+    rtsp_url: str = ""
+    use_webhook: bool = True
+
+
+class ShinobiClient:
+    """Simple Shinobi API client"""
+    
+    def __init__(self, base_url: str, api_key: str, group_key: str):
+        self.base_url = base_url.rstrip('/')
+        self.api_key = api_key
+        self.group_key = group_key
+    
+    def trigger_motion(self, monitor_id: str, event_name: str = "Motion", 
+                       reason: str = "External trigger", confidence: int = 100) -> bool:
+        """Trigger motion event in Shinobi"""
+        import requests
+        
+        url = f"{self.base_url}/{self.api_key}/motion/{self.group_key}/{monitor_id}"
+        params = {
+            "data": json.dumps({
+                "plug": monitor_id,
+                "name": event_name,
+                "reason": reason,
+                "confidence": confidence
+            })
+        }
+        
+        try:
+            resp = requests.get(url, params=params, timeout=10)
+            return resp.status_code == 200
+        except Exception as e:
+            logger.error(f"Failed to trigger motion: {e}")
+            return False
+    
+    def get_monitors(self) -> list:
+        """Get list of monitors"""
+        import requests
+        
+        url = f"{self.base_url}/{self.api_key}/monitor/{self.group_key}"
+        try:
+            resp = requests.get(url, timeout=10)
+            if resp.status_code == 200:
+                return resp.json()
+        except:
+            pass
+        return []
+    
+    def get_recordings(self, monitor_id: str) -> list:
+        """Get recordings for a monitor"""
+        import requests
+        
+        url = f"{self.base_url}/{self.api_key}/videos/{self.group_key}/{monitor_id}"
+        try:
+            resp = requests.get(url, timeout=10)
+            if resp.status_code == 200:
+                data = resp.json()
+                return data.get('videos', [])
+        except:
+            pass
+        return []
+    
+    def download_recording(self, monitor_id: str, filename: str, save_path: str) -> bool:
+        """Download a recording from Shinobi"""
+        import requests
+        
+        url = f"{self.base_url}/{self.api_key}/videos/{self.group_key}/{monitor_id}/{filename}"
+        try:
+            resp = requests.get(url, stream=True, timeout=120)
+            if resp.status_code == 200:
+                with open(save_path, 'wb') as f:
+                    for chunk in resp.iter_content(chunk_size=8192):
+                        f.write(chunk)
+                return True
+        except Exception as e:
+            logger.error(f"Download failed: {e}")
+        return False
+
+
+class EventRecorder:
+    """
+    Handles saving recordings when events occur.
+    Only saves to permanent storage - no continuous sync.
+    """
+    
+    def __init__(self, shinobi: ShinobiClient, permanent_dir: str = "./permanent_recordings"):
+        self.shinobi = shinobi
+        self.permanent_dir = Path(permanent_dir)
+        self.permanent_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Track pending events (to save recordings after they complete)
+        self.pending_events: Dict[str, datetime] = {}
+        self.post_event_seconds = 60
+    
+    def trigger_event(self, camera_id: str, event_type: str, reason: str = "", confidence: int = 100):
+        """
+        Called when an event is detected.
+        1. Triggers motion in Shinobi (for timeline)
+        2. Saves the current recording to permanent storage
+        """
+        now = datetime.now()
+        
+        # Trigger motion in Shinobi for timeline marker
+        self.shinobi.trigger_motion(camera_id, event_type, reason, confidence)
+        
+        # Mark event time
+        self.pending_events[camera_id] = now
+        logger.info(f"🔴 Event triggered: {event_type} on {camera_id}")
+        
+        # Save most recent recording immediately
+        self._save_recording(camera_id, now, event_type)
+    
+    def _save_recording(self, camera_id: str, event_time: datetime, event_type: str):
+        """Save the most recent recording for this camera"""
+        recordings = self.shinobi.get_recordings(camera_id)
+        
+        if not recordings:
+            logger.warning(f"No recordings found for {camera_id}")
+            return
+        
+        # Get the most recent recording
+        recordings.sort(key=lambda r: r.get('time', ''), reverse=True)
+        latest = recordings[0]
+        
+        filename = latest.get('filename')
+        if not filename:
+            return
+        
+        # Create event folder
+        event_folder = self.permanent_dir / camera_id / event_time.strftime("%Y%m%d_%H%M%S")
+        event_folder.mkdir(parents=True, exist_ok=True)
+        
+        save_path = event_folder / filename
+        
+        # Download the recording
+        if self.shinobi.download_recording(camera_id, filename, str(save_path)):
+            size_mb = save_path.stat().st_size / 1024 / 1024
+            logger.info(f"💾 Saved: {filename} ({size_mb:.1f} MB) to permanent/{camera_id}/")
+            
+            # Save event metadata
+            meta = {
+                "event_type": event_type,
+                "event_time": event_time.isoformat(),
+                "camera_id": camera_id,
+                "filename": filename,
+                "recording_start": latest.get('time'),
+                "recording_end": latest.get('end'),
+                "size": latest.get('size')
+            }
+            meta_path = event_folder / "event.json"
+            with open(meta_path, 'w') as f:
+                json.dump(meta, f, indent=2)
+        else:
+            logger.error(f"Failed to save recording {filename}")
+    
+    def get_stats(self) -> dict:
+        """Get storage statistics"""
+        total_size = 0
+        total_files = 0
+        
+        for camera_dir in self.permanent_dir.iterdir():
+            if camera_dir.is_dir():
+                for event_dir in camera_dir.iterdir():
+                    if event_dir.is_dir():
+                        for f in event_dir.glob("*.mp4"):
+                            total_size += f.stat().st_size
+                            total_files += 1
+        
+        return {
+            "permanent_recordings": total_files,
+            "permanent_size_mb": total_size / 1024 / 1024,
+            "pending_events": len(self.pending_events)
+        }
+
+
+class WebhookServer:
+    """Webhook server to receive external events"""
+    
+    def __init__(self, event_recorder: EventRecorder, host: str = "0.0.0.0", port: int = 8765):
+        self.event_recorder = event_recorder
+        self.host = host
+        self.port = port
+        self.app = None
+        self.event_count = 0
+    
+    def setup(self):
+        """Setup FastAPI app"""
+        from fastapi import FastAPI, Request
+        from fastapi.responses import JSONResponse
+        
+        self.app = FastAPI(title="Camera Webhook Server")
+        
+        @self.app.get("/health")
+        async def health():
+            return {"status": "healthy", "events_received": self.event_count}
+        
+        @self.app.post("/webhook")
+        @self.app.post("/webhook/{camera_id}")
+        async def webhook(request: Request, camera_id: str = None):
+            """Generic webhook endpoint"""
+            return await self._handle_webhook(request, camera_id)
+        
+        @self.app.post("/webhook/hikvision")
+        @self.app.post("/webhook/hikvision/{camera_id}")
+        async def hikvision_webhook(request: Request, camera_id: str = None):
+            """Hikvision webhook endpoint"""
+            return await self._handle_webhook(request, camera_id, "hikvision")
+        
+        @self.app.post("/webhook/dahua")
+        @self.app.post("/webhook/dahua/{camera_id}")
+        async def dahua_webhook(request: Request, camera_id: str = None):
+            """Dahua webhook endpoint"""
+            return await self._handle_webhook(request, camera_id, "dahua")
+        
+        @self.app.post("/test/{camera_id}/{event_type}")
+        async def test_event(camera_id: str, event_type: str):
+            """Test endpoint to trigger events manually"""
+            self.event_recorder.trigger_event(
+                camera_id, 
+                event_type.title(), 
+                "Manual test trigger",
+                100
+            )
+            self.event_count += 1
+            return {"status": "triggered", "camera": camera_id, "event": event_type}
+        
+        return self.app
+    
+    async def _handle_webhook(self, request: Request, camera_id: str = None, vendor: str = None):
+        """Process incoming webhook"""
+        try:
+            body = await request.body()
+            
+            try:
+                data = json.loads(body.decode()) if body else {}
+            except:
+                data = {"raw": body.decode() if body else ""}
+            
+            # Extract event info
+            event_type = self._extract_event_type(data, vendor)
+            cam_id = camera_id or self._extract_camera_id(data)
+            confidence = self._extract_confidence(data)
+            reason = self._extract_reason(data, event_type)
+            
+            if cam_id and event_type:
+                logger.info(f"🚨 {event_type.upper()} on {cam_id}: {reason}")
+                self.event_recorder.trigger_event(cam_id, event_type, reason, confidence)
+                self.event_count += 1
+            
+            return JSONResponse({"status": "received"})
+        
+        except Exception as e:
+            logger.error(f"Webhook error: {e}")
+            return JSONResponse({"error": str(e)}, status_code=500)
+    
+    def _extract_event_type(self, data: dict, vendor: str = None) -> str:
+        """Extract event type from webhook data"""
+        # Common fields
+        for field in ['event_type', 'eventType', 'type', 'name', 'event']:
+            if field in data:
+                return str(data[field])
+        
+        # Nested
+        if 'events' in data and data['events']:
+            return data['events'][0].get('type', 'motion')
+        
+        return "motion"
+    
+    def _extract_camera_id(self, data: dict) -> str:
+        """Extract camera ID from webhook data"""
+        for field in ['camera_id', 'cameraId', 'channel', 'monitor_id', 'mid', 'deviceId']:
+            if field in data:
+                return str(data[field])
+        return None
+    
+    def _extract_confidence(self, data: dict) -> int:
+        """Extract confidence from webhook data"""
+        for field in ['confidence', 'score', 'probability']:
+            if field in data:
+                val = data[field]
+                if isinstance(val, (int, float)):
+                    return int(val * 100 if val <= 1 else val)
+        return 100
+    
+    def _extract_reason(self, data: dict, event_type: str) -> str:
+        """Extract reason/description from webhook data"""
+        for field in ['reason', 'description', 'message', 'details']:
+            if field in data:
+                return str(data[field])
+        return f"{event_type} detected"
+    
+    async def run(self):
+        """Run the webhook server"""
+        import uvicorn
+        
+        self.setup()
+        config = uvicorn.Config(self.app, host=self.host, port=self.port, log_level="warning")
+        server = uvicorn.Server(config)
+        
+        logger.info(f"🚀 Webhook server starting on {self.host}:{self.port}")
+        await server.serve()
 
 
 class CameraSystem:
-    """
-    Complete camera system:
-    - Shinobi for continuous recording
-    - Webhook server OR ONVIF polling for motion events
-    - Local storage with temp/permanent separation
-    """
+    """Main camera recording system"""
     
     def __init__(self, config_path: str = "config.json"):
         self.config = self._load_config(config_path)
-        
-        # Initialize components
-        self.shinobi = self._init_shinobi()
-        self.onvif = ONVIFEventListener()
+        self.cameras: list[CameraConfig] = []
+        self.shinobi: Optional[ShinobiClient] = None
+        self.event_recorder: Optional[EventRecorder] = None
         self.webhook_server: Optional[WebhookServer] = None
-        self.storage: Optional[LocalStorageManager] = None
-        
         self.running = False
-        
-        # Setup logging
-        logger.remove()
-        logger.add(sys.stderr, level="INFO",
-                   format="<green>{time:HH:mm:ss}</green> | <level>{level:<8}</level> | {message}")
-        logger.add("camera_system.log", rotation="50 MB", level="DEBUG")
-
+    
     def _load_config(self, path: str) -> dict:
-        with open(path) as f:
-            return json.load(f)
-
-    def _init_shinobi(self) -> ShinobiClient:
-        cfg = self.config['shinobi']
-        return ShinobiClient(
-            base_url=cfg['base_url'],
-            api_key=cfg['api_key'],
-            group_key=cfg['group_key']
+        try:
+            with open(path) as f:
+                return json.load(f)
+        except Exception as e:
+            logger.error(f"Failed to load config: {e}")
+            return {}
+    
+    def setup(self):
+        """Initialize all components"""
+        # Shinobi client
+        shinobi_cfg = self.config.get('shinobi', {})
+        self.shinobi = ShinobiClient(
+            base_url=shinobi_cfg.get('base_url', 'http://localhost:8080'),
+            api_key=shinobi_cfg.get('api_key', ''),
+            group_key=shinobi_cfg.get('group_key', '')
         )
-
-    def _init_storage(self) -> Optional['LocalStorageManager']:
-        if LocalStorageManager is None:
-            return None
-            
+        
+        # Load cameras
+        for cam_cfg in self.config.get('cameras', []):
+            self.cameras.append(CameraConfig(
+                id=cam_cfg['id'],
+                name=cam_cfg.get('name', cam_cfg['id']),
+                rtsp_url=cam_cfg.get('rtsp_url', ''),
+                use_webhook=cam_cfg.get('use_webhook', True)
+            ))
+        
+        # Event recorder (saves to permanent only)
         storage_cfg = self.config.get('storage', {})
-        recording_cfg = self.config.get('recording', {})
-        
-        manager = LocalStorageManager(
-            shinobi_client=self.shinobi,
-            temp_dir=storage_cfg.get('temp_dir', './temp_recordings'),
-            permanent_dir=storage_cfg.get('permanent_dir', './permanent_recordings'),
-            temp_retention_hours=storage_cfg.get('temp_retention_hours', 1.0),
-            sync_interval_seconds=storage_cfg.get('sync_interval', 30),
-            cleanup_interval_seconds=storage_cfg.get('cleanup_interval', 300)
+        self.event_recorder = EventRecorder(
+            shinobi=self.shinobi,
+            permanent_dir=storage_cfg.get('permanent_dir', './permanent_recordings')
         )
         
-        manager.set_event_buffers(
-            pre_seconds=recording_cfg.get('pre_event_seconds', 60),
-            post_seconds=recording_cfg.get('post_event_seconds', 60)
-        )
-        
-        return manager
-
-
-    def _init_webhook_server(self) -> WebhookServer:
-        """Initialize FastAPI webhook server"""
+        # Webhook server
         webhook_cfg = self.config.get('webhook', {})
-        
-        # Build camera mapping
-        camera_mapping = {}
-        for cam in self.config.get('cameras', []):
-            # Map by various identifiers
-            if 'external_id' in cam:
-                camera_mapping[cam['external_id']] = cam['id']
-            if 'ip' in cam:
-                camera_mapping[cam['ip']] = cam['id']
-            if 'channel' in cam:
-                camera_mapping[str(cam['channel'])] = cam['id']
-        
-        # Configure external receiver URL for event forwarding
-        external_receiver = webhook_cfg.get('external_receiver_url')
-        if not external_receiver:
-            # Default to our FastAPI receiver on port 8766
-            external_receiver = "http://localhost:8766"
-        
-        return WebhookServer(
-            shinobi_client=self.shinobi,
-            host=webhook_cfg.get('host', '0.0.0.0'),
-            port=webhook_cfg.get('port', 8765),
-            webhook_secret=webhook_cfg.get('secret'),
-            camera_mapping=camera_mapping,
-            external_receiver_url=external_receiver
-        )
-
-    async def setup_cameras(self):
-        """Check cameras exist in Shinobi"""
-        existing_monitors = self.shinobi.get_monitors()
-        existing_ids = {m.get('mid') for m in existing_monitors} if existing_monitors else set()
-        
-        logger.info(f"Found {len(existing_ids)} existing monitors in Shinobi: {existing_ids}")
-        
-        for cam in self.config.get('cameras', []):
-            camera_id = cam['id']
-            name = cam.get('name', camera_id)
-            
-            if camera_id in existing_ids:
-                logger.info(f"✅ {name} ({camera_id}) - already exists in Shinobi")
-            else:
-                logger.warning(f"⚠️ {name} ({camera_id}) - NOT found in Shinobi!")
-                logger.warning(f"   Please create it manually in Shinobi UI with:")
-                logger.warning(f"   Monitor ID: {camera_id}")
-                logger.warning(f"   RTSP URL: {cam.get('rtsp_url', 'N/A')}")
-
-    async def _on_motion_event(self, camera_id: str, event: dict):
-        """Called when ONVIF motion detected (legacy polling mode)"""
-        topic = event.get('topic', 'Motion')
-        
-        event_type = "Motion"
-        topic_lower = topic.lower()
-        if 'tamper' in topic_lower:
-            event_type = "Tampering"
-        elif 'linecross' in topic_lower:
-            event_type = "Line Crossing"
-        elif 'intrusion' in topic_lower:
-            event_type = "Intrusion"
-        
-        logger.info(f"🚨 {event_type} detected on {camera_id}")
-        
-        # Mark recordings as permanent in local storage
-        if self.storage:
-            self.storage.trigger_event(camera_id)
-        
-        # Trigger Shinobi motion API
-        self.shinobi.trigger_motion(camera_id, event_type, f"ONVIF: {topic}")
-
-    async def _on_webhook_event(self, event: ONVIFWebhookEvent):
-        """Called when webhook server receives an event"""
-        logger.info(f"📥 Webhook event: {event.event_type} on {event.camera_id}")
-        
-        # Mark recordings as permanent in local storage
-        if self.storage:
-            self.storage.trigger_event(event.camera_id)
-        
-        # Note: Shinobi trigger is already handled by webhook_server
-
-    async def setup_onvif(self):
-        """Setup ONVIF event listeners (legacy polling mode)"""
-        await self.onvif.start()
-        
-        for cam in self.config.get('cameras', []):
-            onvif_url = cam.get('onvif_url')
-            if not onvif_url:
-                continue
-            
-            # Skip if using webhook mode for this camera
-            if cam.get('use_webhook', False):
-                continue
-            
-            camera_id = cam['id']
-            
-            success = await self.onvif.start_listening(
-                camera_id=camera_id,
-                onvif_url=onvif_url,
-                username=cam.get('username', 'admin'),
-                password=cam.get('password', ''),
-                callback=self._on_motion_event
+        if webhook_cfg.get('enabled', True):
+            self.webhook_server = WebhookServer(
+                event_recorder=self.event_recorder,
+                host=webhook_cfg.get('host', '0.0.0.0'),
+                port=webhook_cfg.get('port', 8765)
             )
-            
-            if success:
-                logger.info(f"✅ ONVIF listener active for {camera_id}")
-
-    async def setup_webhook_server(self):
-        """Setup FastAPI webhook server"""
-        webhook_cfg = self.config.get('webhook', {})
-        
-        if not webhook_cfg.get('enabled', True):
-            logger.info("Webhook server disabled in config")
-            return False
-        
-        self.webhook_server = self._init_webhook_server()
-        
-        # Register callback for local storage
-        self.webhook_server.add_event_callback(self._on_webhook_event)
-        
-        logger.info(f"✅ Webhook server configured on port {webhook_cfg.get('port', 8765)}")
-        return True
-
-    def print_info(self):
+    
+    def print_status(self):
         """Print system status"""
-        storage_cfg = self.config.get('storage', {})
-        recording_cfg = self.config.get('recording', {})
-        webhook_cfg = self.config.get('webhook', {})
-        
         print("\n" + "=" * 70)
-        print("📹 CAMERA RECORDING SYSTEM")
+        print("📹 CAMERA RECORDING SYSTEM (Simplified)")
         print("=" * 70)
         
-        # Webhook info
-        if self.webhook_server:
-            print(f"\n🌐 Webhook Server:")
-            print(f"   Status:           ACTIVE")
-            print(f"   Port:             {webhook_cfg.get('port', 8765)}")
-            print(f"   Generic endpoint: {self.webhook_server.get_webhook_url()}")
-            print(f"   Hikvision:        http://0.0.0.0:{webhook_cfg.get('port', 8765)}/webhook/hikvision")
-            print(f"   Dahua:            http://0.0.0.0:{webhook_cfg.get('port', 8765)}/webhook/dahua")
-            print(f"   Health check:     http://0.0.0.0:{webhook_cfg.get('port', 8765)}/health")
+        print("\n🌐 Webhook Server:")
+        webhook_cfg = self.config.get('webhook', {})
+        port = webhook_cfg.get('port', 8765)
+        print(f"   Status:           ACTIVE")
+        print(f"   Port:             {port}")
+        print(f"   Generic endpoint: http://0.0.0.0:{port}/webhook")
+        print(f"   Test endpoint:    http://0.0.0.0:{port}/test/{{camera_id}}/{{event_type}}")
         
-        print(f"\n📂 Local Storage (on your PC):")
-        print(f"   Temp recordings:      {storage_cfg.get('temp_dir', './temp_recordings')}")
-        print(f"   Permanent recordings: {storage_cfg.get('permanent_dir', './permanent_recordings')}")
-        print(f"   Temp retention:       {storage_cfg.get('temp_retention_hours', 1)} hour(s)")
-        print(f"   Sync interval:        {storage_cfg.get('sync_interval', 30)} seconds")
+        print(f"\n📂 Permanent Storage:")
+        print(f"   Directory:        {self.config.get('storage', {}).get('permanent_dir', './permanent_recordings')}")
+        print(f"   (Recordings saved only when events occur)")
         
-        print(f"\n⏱️ Event Recording:")
-        print(f"   Pre-event buffer:     {recording_cfg.get('pre_event_seconds', 60)} seconds")
-        print(f"   Post-event buffer:    {recording_cfg.get('post_event_seconds', 60)} seconds")
+        print(f"\n🎬 Video Viewer:")
+        print(f"   URL:              http://localhost:8766")
+        print(f"   (Run webhook_receiver.py separately)")
         
-        print(f"\n🎬 VLC Stream URLs:")
-        for cam in self.config.get('cameras', []):
-            cid = cam['id']
-            name = cam.get('name', cid)
-            url = self.shinobi.get_stream_url(cid)
-            print(f"   {name}: {url}")
-        
-        print(f"\n📷 Cameras:")
-        for cam in self.config.get('cameras', []):
-            cid = cam['id']
-            name = cam.get('name', cid)
-            
-            # Determine event source
-            if cam.get('use_webhook', False):
-                event_src = "🌐 Webhook"
-                webhook_url = self.webhook_server.get_webhook_url(cid) if self.webhook_server else "N/A"
-                print(f"   • {name} ({cid}) - {event_src}")
-                print(f"     Webhook URL: {webhook_url}")
-            elif cam.get('onvif_url'):
-                print(f"   • {name} ({cid}) - 📡 ONVIF Polling")
-            else:
-                print(f"   • {name} ({cid}) - ❌ No event source")
+        shinobi_cfg = self.config.get('shinobi', {})
+        print(f"\n📷 Cameras (streaming from Shinobi):")
+        for cam in self.cameras:
+            print(f"   • {cam.name} ({cam.id})")
+            print(f"     Stream: {shinobi_cfg.get('base_url')}/{shinobi_cfg.get('api_key')}/hls/{shinobi_cfg.get('group_key')}/{cam.id}/s.m3u8")
         
         print("\n" + "=" * 70)
-        print("Recording flow:")
-        print("  1. Shinobi records continuously")
+        print("How it works:")
+        print("  1. Shinobi records continuously (stored on Shinobi server)")
         print("  2. Webhook receives events (person, car, motion, etc.)")
-        print("  3. Events trigger Shinobi motion API")
-        print("  4. Recordings synced to temp_recordings/ on your PC")
-        print("  5. On motion event → moved to permanent_recordings/")
+        print("  3. Event triggers Shinobi motion API (timeline marker)")
+        print("  4. Recording downloaded to permanent_recordings/ (event clips only)")
+        print("  5. View recordings at http://localhost:8766 (streams from Shinobi)")
         print("=" * 70)
         print("Press Ctrl+C to stop\n")
-
+    
+    async def status_loop(self):
+        """Print periodic status updates"""
+        while self.running:
+            await asyncio.sleep(60)
+            
+            stats = self.event_recorder.get_stats()
+            event_count = self.webhook_server.event_count if self.webhook_server else 0
+            
+            logger.info(
+                f"📊 Status: {stats['permanent_recordings']} permanent recordings "
+                f"({stats['permanent_size_mb']:.1f} MB), "
+                f"📥 {event_count} webhook events"
+            )
+    
     async def run(self):
-        """Main run loop"""
+        """Run the system"""
+        logger.info("Starting Camera Recording System (Simplified)...")
+        
+        self.setup()
+        
+        # Check Shinobi connection
+        monitors = self.shinobi.get_monitors()
+        if monitors:
+            monitor_ids = {m.get('mid') for m in monitors}
+            logger.info(f"Found {len(monitors)} monitors in Shinobi")
+            
+            for cam in self.cameras:
+                if cam.id in monitor_ids:
+                    logger.info(f"✅ {cam.name} ({cam.id}) - connected")
+                else:
+                    logger.warning(f"⚠️ {cam.name} ({cam.id}) - not found in Shinobi")
+        
+        self.print_status()
+        
         self.running = True
         
-        logger.info("Starting Camera Recording System...")
+        # Start tasks
+        tasks = [
+            asyncio.create_task(self.status_loop())
+        ]
         
-        # Initialize storage manager
-        self.storage = self._init_storage()
-        
-        # Setup cameras in Shinobi
-        await self.setup_cameras()
-        
-        # Setup webhook server
-        webhook_enabled = await self.setup_webhook_server()
-        
-        # Setup ONVIF listeners (for cameras not using webhook)
-        await self.setup_onvif()
-        
-        # Start local storage sync
-        if self.storage:
-            await self.storage.start()
-        
-        # Print info
-        self.print_info()
-        
-        # Create tasks
-        tasks = []
-        
-        # Webhook server task
         if self.webhook_server:
-            tasks.append(asyncio.create_task(self._run_webhook_server()))
-        
-        # Status update task
-        tasks.append(asyncio.create_task(self._status_loop()))
+            tasks.append(asyncio.create_task(self.webhook_server.run()))
         
         try:
             await asyncio.gather(*tasks)
         except asyncio.CancelledError:
             pass
         finally:
-            await self.stop()
+            self.running = False
+            logger.info("Camera Recording System stopped")
 
-    async def _run_webhook_server(self):
-        """Run webhook server"""
-        import uvicorn
-        
-        webhook_cfg = self.config.get('webhook', {})
-        
-        config = uvicorn.Config(
-            self.webhook_server.app,
-            host=webhook_cfg.get('host', '0.0.0.0'),
-            port=webhook_cfg.get('port', 8765),
-            log_level="warning"  # Reduce noise
-        )
-        server = uvicorn.Server(config)
-        await server.serve()
-
-    async def _status_loop(self):
-        """Periodic status updates"""
-        while self.running:
-            await asyncio.sleep(60)
-            
-            if self.storage:
-                stats = self.storage.get_stats()
-                storage_info = (
-                    f"{stats['temp_recordings']} temp ({stats['temp_size_mb']:.1f}MB), "
-                    f"{stats['permanent_recordings']} permanent ({stats['permanent_size_mb']:.1f}MB)"
-                )
-            else:
-                storage_info = "N/A"
-            
-            webhook_info = ""
-            if self.webhook_server:
-                ws = self.webhook_server.stats
-                webhook_info = f", 📥 {ws['total_events']} webhook events"
-            
-            logger.info(f"📊 Status: {storage_info}{webhook_info}")
-
-    async def stop(self):
-        """Stop everything"""
-        self.running = False
-        
-        if self.storage:
-            await self.storage.stop()
-        await self.onvif.stop()
-        
-        logger.info("Camera Recording System stopped")
-
-
-# ==================== CLI ====================
 
 async def main():
-    import argparse
-    
-    parser = argparse.ArgumentParser(description='Camera Recording System with Webhook Support')
-    parser.add_argument('-c', '--config', default='config.json', help='Config file')
-    parser.add_argument('--streams', action='store_true', help='Show stream URLs')
-    parser.add_argument('--stats', action='store_true', help='Show storage stats')
-    parser.add_argument('--webhooks', action='store_true', help='Show webhook URLs for cameras')
-    parser.add_argument('--test-event', type=str, metavar='CAMERA_ID', help='Test motion event')
-    parser.add_argument('--test-type', type=str, default='motion', help='Event type for test')
-    parser.add_argument('--webhook-only', action='store_true', help='Run only webhook server')
-    
-    args = parser.parse_args()
-    
-    system = CameraSystem(args.config)
-    
-    if args.streams:
-        print("\n🎬 VLC Stream URLs:\n")
-        for cam in system.config.get('cameras', []):
-            cid = cam['id']
-            name = cam.get('name', cid)
-            print(f"{name}:")
-            print(f"  HLS:   {system.shinobi.get_stream_url(cid, 'hls')}")
-            print(f"  MJPEG: {system.shinobi.get_stream_url(cid, 'mjpeg')}")
-            print()
-        return
-    
-    if args.webhooks:
-        webhook_cfg = system.config.get('webhook', {})
-        port = webhook_cfg.get('port', 8765)
-        host = webhook_cfg.get('host', '0.0.0.0')
-        
-        print(f"\n🌐 Webhook URLs (configure these in your camera/NVR):\n")
-        print(f"Generic endpoint:  http://{host}:{port}/webhook")
-        print(f"Hikvision ISAPI:   http://{host}:{port}/webhook/hikvision")
-        print(f"Dahua:             http://{host}:{port}/webhook/dahua")
-        print()
-        print("Camera-specific endpoints:")
-        for cam in system.config.get('cameras', []):
-            cid = cam['id']
-            name = cam.get('name', cid)
-            print(f"  {name}: http://{host}:{port}/webhook/{cid}")
-        print()
-        print(f"Test endpoint:     POST http://{host}:{port}/test/{{camera_id}}/{{event_type}}")
-        print(f"Health check:      GET  http://{host}:{port}/health")
-        print()
-        return
-    
-    if args.stats:
-        system.storage = system._init_storage()
-        if system.storage:
-            stats = system.storage.get_stats()
-            print(f"\n📊 Storage Statistics:")
-            print(f"   Temp recordings:      {stats['temp_recordings']} ({stats['temp_size_mb']:.1f} MB)")
-            print(f"   Permanent recordings: {stats['permanent_recordings']} ({stats['permanent_size_mb']:.1f} MB)")
-        else:
-            print("Storage manager not available")
-        return
-    
-    if args.test_event:
-        # Use webhook test endpoint
-        import aiohttp
-        
-        webhook_cfg = system.config.get('webhook', {})
-        port = webhook_cfg.get('port', 8765)
-        url = f"http://localhost:{port}/test/{args.test_event}/{args.test_type}"
-        
-        print(f"Starting webhook server briefly for test...")
-        
-        # Start server in background
-        system.webhook_server = system._init_webhook_server()
-        server_task = asyncio.create_task(system._run_webhook_server())
-        
-        await asyncio.sleep(2)  # Wait for server to start
-        
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url) as resp:
-                result = await resp.json()
-                print(f"✅ Test result: {result}")
-        
-        server_task.cancel()
-        return
-    
-    if args.webhook_only:
-        # Run only the webhook server
-        print("Starting webhook server only...")
-        system.webhook_server = system._init_webhook_server()
-        system.print_info()
-        await system._run_webhook_server()
-        return
-    
-    # Normal run - full system
-    try:
-        await system.run()
-    except KeyboardInterrupt:
-        await system.stop()
+    system = CameraSystem()
+    await system.run()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\nShutting down...")

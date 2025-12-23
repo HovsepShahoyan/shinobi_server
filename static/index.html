@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>📹 Camera Recording Viewer</title>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <div class="app">
+        <header>
+            <div class="logo">
+                <span class="logo-icon">📹</span>
+                <span>Camera Viewer</span>
+            </div>
+            <div class="camera-tabs" id="cameraTabs"></div>
+            <div class="status-badge">
+                <div class="status-dot" id="statusDot"></div>
+                <span id="statusText">Connecting...</span>
+            </div>
+        </header>
+        
+        <div class="main">
+            <div class="video-section">
+                <div class="video-container">
+                    <video id="videoPlayer" controls>
+                        <source src="" type="video/mp4">
+                    </video>
+                    <div class="video-placeholder" id="placeholder">
+                        <div class="icon">🎬</div>
+                        <div>Select a recording to play</div>
+                    </div>
+                </div>
+                
+                <div class="timeline-bar">
+                    <div class="timeline-labels">
+                        <span id="timelineStart"></span>
+                        <span id="timelineEnd"></span>
+                    </div>
+                    <div class="timeline-track" id="timeline"></div>
+                </div>
+                
+                <div class="video-info">
+                    <div class="video-title" id="videoTitle">No video selected</div>
+                    <div class="video-meta" id="videoMeta"></div>
+                </div>
+            </div>
+            
+            <div class="sidebar">
+                <div class="sidebar-section">
+                    <div class="sidebar-header">
+                        <span>🎯 Events</span>
+                        <span class="sidebar-count" id="eventCount">0</span>
+                    </div>
+                    <div class="sidebar-content" id="eventsList">
+                        <div class="loading">Loading events...</div>
+                    </div>
+                </div>
+                
+                <div class="sidebar-section recordings-section">
+                    <div class="sidebar-header">
+                        <span>🎬 Recordings</span>
+                        <span class="sidebar-count" id="recordingCount">0</span>
+                    </div>
+                    <div class="sidebar-content" id="recordingsList">
+                        <div class="loading">Loading recordings...</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/app.js"></script>
+</body>
+</html>
