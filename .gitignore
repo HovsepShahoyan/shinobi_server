@@ -69,3 +69,45 @@ htmlcov/
 
 # Jupyter
 .ipynb_checkpoints/
+
+# Electron
+node_modules/
+dist/
+out/
+build/
+*.log
+.npm
+.yarn
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+venv/
+env/
+*.egg-info/
+.eggs/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Recordings/Media
+*.mp4
+*.mkv
+*.avi
+temp_recordings/
+permanent_recordings/
+dummy_streams/*.mp4
+
+# Models
+*.pt
+*.onnx
+*.engine

@@ -1,0 +1,561 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src *; connect-src *; media-src *;">
+    <title>Camera Viewer</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        
+        :root {
+            --bg-dark: #0d1117;
+            --bg-card: #161b22;
+            --bg-hover: #21262d;
+            --border: #30363d;
+            --accent: #58a6ff;
+            --text: #c9d1d9;
+            --text-dim: #8b949e;
+            --danger: #f85149;
+            --success: #3fb950;
+            --warning: #d29922;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: var(--bg-dark);
+            color: var(--text);
+            height: 100vh;
+            overflow: hidden;
+        }
+        
+        .app {
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+        }
+        
+        /* Header */
+        .header {
+            background: var(--bg-card);
+            border-bottom: 1px solid var(--border);
+            padding: 12px 16px;
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            flex-shrink: 0;
+        }
+        
+        .logo {
+            font-size: 18px;
+            font-weight: 700;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .camera-tabs {
+            display: flex;
+            gap: 8px;
+        }
+        
+        .camera-tab {
+            padding: 8px 16px;
+            background: var(--bg-dark);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            color: var(--text-dim);
+            cursor: pointer;
+            font-size: 13px;
+        }
+        
+        .camera-tab:hover {
+            border-color: var(--accent);
+            color: var(--text);
+        }
+        
+        .camera-tab.active {
+            background: var(--accent);
+            border-color: var(--accent);
+            color: #000;
+            font-weight: 600;
+        }
+        
+        .header-right {
+            margin-left: auto;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        
+        .icon-btn {
+            width: 32px;
+            height: 32px;
+            border: none;
+            background: var(--bg-dark);
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        
+        .icon-btn:hover {
+            background: var(--bg-hover);
+        }
+        
+        .status {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 12px;
+        }
+        
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--warning);
+        }
+        
+        .status-dot.connected { background: var(--success); }
+        .status-dot.disconnected { background: var(--danger); }
+        
+        /* Main Content */
+        .main {
+            display: flex;
+            flex: 1;
+            min-height: 0;
+        }
+        
+        /* Video Section */
+        .video-section {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            background: #000;
+            min-width: 0;
+        }
+        
+        .video-container {
+            flex: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            position: relative;
+            min-height: 0;
+        }
+        
+        video {
+            max-width: 100%;
+            max-height: 100%;
+        }
+        
+        .placeholder {
+            color: var(--text-dim);
+            text-align: center;
+        }
+        
+        .placeholder.hidden { display: none; }
+        
+        .placeholder-icon {
+            font-size: 48px;
+            margin-bottom: 12px;
+            opacity: 0.3;
+        }
+        
+        /* Timeline */
+        .timeline-bar {
+            background: var(--bg-card);
+            padding: 12px 16px;
+            border-top: 1px solid var(--border);
+        }
+        
+        .timeline-track {
+            height: 32px;
+            background: var(--bg-dark);
+            border-radius: 6px;
+            display: flex;
+            align-items: center;
+            padding: 0 4px;
+            gap: 2px;
+        }
+        
+        .timeline-segment {
+            height: 20px;
+            flex: 1;
+            min-width: 4px;
+            background: var(--accent);
+            opacity: 0.5;
+            border-radius: 2px;
+            cursor: pointer;
+            position: relative;
+        }
+        
+        .timeline-segment:hover {
+            opacity: 1;
+        }
+        
+        .timeline-segment.active {
+            background: var(--success);
+            opacity: 1;
+        }
+        
+        .timeline-segment.has-events::after {
+            content: '';
+            position: absolute;
+            top: -4px;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 8px;
+            height: 8px;
+            background: var(--danger);
+            border-radius: 50%;
+        }
+        
+        .video-info {
+            background: var(--bg-card);
+            padding: 8px 16px;
+            font-size: 12px;
+            color: var(--text-dim);
+            border-top: 1px solid var(--border);
+        }
+        
+        /* Sidebar */
+        .sidebar {
+            width: 350px;
+            background: var(--bg-card);
+            border-left: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+            flex-shrink: 0;
+        }
+        
+        .sidebar-section {
+            display: flex;
+            flex-direction: column;
+            border-bottom: 1px solid var(--border);
+        }
+        
+        .sidebar-section.flex-1 {
+            flex: 1;
+            min-height: 0;
+        }
+        
+        .sidebar-header {
+            padding: 12px 16px;
+            background: var(--bg-dark);
+            font-size: 12px;
+            font-weight: 600;
+            text-transform: uppercase;
+            color: var(--text-dim);
+            display: flex;
+            justify-content: space-between;
+            flex-shrink: 0;
+        }
+        
+        .sidebar-count {
+            background: var(--bg-hover);
+            padding: 2px 8px;
+            border-radius: 10px;
+        }
+        
+        .sidebar-content {
+            flex: 1;
+            overflow-y: auto;
+            min-height: 0;
+        }
+        
+        /* Events */
+        .event-item {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 12px 16px;
+            border-bottom: 1px solid var(--border);
+            cursor: pointer;
+        }
+        
+        .event-item:hover {
+            background: var(--bg-hover);
+        }
+        
+        .event-item.active {
+            background: var(--accent);
+            color: #000;
+        }
+        
+        .event-icon {
+            width: 32px;
+            height: 32px;
+            border-radius: 6px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 16px;
+            background: rgba(88, 166, 255, 0.15);
+        }
+        
+        .event-info { flex: 1; }
+        
+        .event-type {
+            font-weight: 600;
+            font-size: 13px;
+        }
+        
+        .event-time {
+            font-size: 11px;
+            color: var(--text-dim);
+        }
+        
+        .event-item.active .event-time {
+            color: rgba(0,0,0,0.6);
+        }
+        
+        .event-confidence {
+            font-size: 11px;
+            padding: 2px 8px;
+            background: var(--bg-dark);
+            border-radius: 4px;
+            color: var(--text-dim);
+        }
+        
+        /* Recordings */
+        .recording-item {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 10px 16px;
+            border-bottom: 1px solid var(--border);
+            cursor: pointer;
+        }
+        
+        .recording-item:hover {
+            background: var(--bg-hover);
+        }
+        
+        .recording-item.active {
+            background: var(--accent);
+            color: #000;
+        }
+        
+        .recording-info { flex: 1; }
+        
+        .recording-name {
+            font-size: 12px;
+            font-family: monospace;
+        }
+        
+        .recording-meta {
+            font-size: 11px;
+            color: var(--text-dim);
+            display: flex;
+            gap: 12px;
+        }
+        
+        .recording-item.active .recording-meta {
+            color: rgba(0,0,0,0.6);
+        }
+        
+        .event-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--danger);
+        }
+        
+        /* States */
+        .loading, .empty-state, .error-state {
+            padding: 30px;
+            text-align: center;
+            color: var(--text-dim);
+            font-size: 13px;
+        }
+        
+        .error-state { color: var(--danger); }
+        
+        /* Modal */
+        .modal {
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: rgba(0,0,0,0.8);
+            align-items: center;
+            justify-content: center;
+            z-index: 100;
+        }
+        
+        .modal.open { display: flex; }
+        
+        .modal-content {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            width: 400px;
+        }
+        
+        .modal-header {
+            padding: 16px;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .modal-header h2 { font-size: 16px; }
+        
+        .close-btn {
+            background: none;
+            border: none;
+            color: var(--text-dim);
+            font-size: 24px;
+            cursor: pointer;
+        }
+        
+        .modal-body { padding: 16px; }
+        
+        .form-group { margin-bottom: 16px; }
+        
+        .form-group label {
+            display: block;
+            margin-bottom: 6px;
+            font-size: 13px;
+        }
+        
+        .form-group input[type="text"] {
+            width: 100%;
+            padding: 10px;
+            background: var(--bg-dark);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            color: var(--text);
+            font-size: 13px;
+        }
+        
+        .form-group input:focus {
+            outline: none;
+            border-color: var(--accent);
+        }
+        
+        .form-group small {
+            display: block;
+            margin-top: 4px;
+            color: var(--text-dim);
+            font-size: 11px;
+        }
+        
+        .modal-footer {
+            padding: 16px;
+            border-top: 1px solid var(--border);
+            display: flex;
+            justify-content: flex-end;
+            gap: 10px;
+        }
+        
+        .btn {
+            padding: 8px 16px;
+            border: none;
+            border-radius: 6px;
+            font-size: 13px;
+            cursor: pointer;
+        }
+        
+        .btn-secondary {
+            background: var(--bg-dark);
+            color: var(--text);
+        }
+        
+        .btn-primary {
+            background: var(--accent);
+            color: #000;
+        }
+    </style>
+</head>
+<body>
+    <div class="app">
+        <!-- Header -->
+        <div class="header">
+            <div class="logo">
+                <span>📹</span>
+                <span>Camera Viewer</span>
+            </div>
+            <div class="camera-tabs" id="cameraTabs"></div>
+            <div class="header-right">
+                <button class="icon-btn" id="refreshBtn">🔄</button>
+                <button class="icon-btn" id="settingsBtn">⚙️</button>
+                <div class="status">
+                    <div class="status-dot" id="statusDot"></div>
+                    <span id="statusText">Connecting...</span>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Main -->
+        <div class="main">
+            <!-- Video -->
+            <div class="video-section">
+                <div class="video-container">
+                    <video id="videoPlayer" controls></video>
+                    <div class="placeholder" id="placeholder">
+                        <div class="placeholder-icon">🎬</div>
+                        <div>Select a recording to play</div>
+                    </div>
+                </div>
+                <div class="timeline-bar">
+                    <div class="timeline-track" id="timeline"></div>
+                </div>
+                <div class="video-info" id="videoInfo">No video selected</div>
+            </div>
+            
+            <!-- Sidebar -->
+            <div class="sidebar">
+                <div class="sidebar-section">
+                    <div class="sidebar-header">
+                        <span>🎯 Events</span>
+                        <span class="sidebar-count" id="eventCount">0</span>
+                    </div>
+                    <div class="sidebar-content" id="eventsList" style="max-height: 300px;">
+                        <div class="loading">Loading...</div>
+                    </div>
+                </div>
+                <div class="sidebar-section flex-1">
+                    <div class="sidebar-header">
+                        <span>🎬 Recordings</span>
+                        <span class="sidebar-count" id="recordingCount">0</span>
+                    </div>
+                    <div class="sidebar-content" id="recordingsList">
+                        <div class="loading">Loading...</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Settings Modal -->
+    <div class="modal" id="settingsModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>⚙️ Settings</h2>
+                <button class="close-btn" id="closeSettings">×</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label>Server URL</label>
+                    <input type="text" id="serverUrlInput" value="http://localhost:8766">
+                    <small>URL of webhook_receiver.py server</small>
+                </div>
+                <div class="form-group">
+                    <label>
+                        <input type="checkbox" id="alwaysOnTopCheck">
+                        Always on Top
+                    </label>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" id="cancelSettings">Cancel</button>
+                <button class="btn btn-primary" id="saveSettings">Save</button>
+            </div>
+        </div>
+    </div>
+    
+    <script src="renderer.js"></script>
+</body>
+</html>

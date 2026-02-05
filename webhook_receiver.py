@@ -61,7 +61,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
 # ==================== Webhook Endpoints ====================
 
 @app.get("/health")
@@ -72,7 +71,6 @@ async def health_check():
         "service": "Camera Webhook Receiver",
         "timestamp": datetime.now().isoformat()
     }
-
 
 @app.post("/webhook/shinobi")
 async def receive_shinobi_webhook(request: Request):
@@ -134,7 +132,6 @@ async def receive_shinobi_webhook(request: Request):
         print(f"❌ Error processing webhook: {e}")
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-
 @app.get("/events")
 async def get_received_events():
     """Get list of received events from log file"""
@@ -148,7 +145,6 @@ async def get_received_events():
         return {"events": events[-100:], "count": len(events)}
     except Exception as e:
         return {"error": str(e), "events": [], "count": 0}
-
 
 # ==================== Video & Timeline API ====================
 
@@ -165,7 +161,6 @@ async def get_cameras():
             for cam in cameras
         ]
     }
-
 
 @app.get("/api/recordings/{camera_id}")
 async def get_recordings(camera_id: str, source: str = Query("shinobi")):
