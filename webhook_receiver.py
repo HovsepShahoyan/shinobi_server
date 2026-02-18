@@ -21,6 +21,7 @@ from fastapi import FastAPI, Request, Query, HTTPException
 from fastapi.responses import JSONResponse, FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
+from ptz_endpoints import ptz_router
 import httpx
 import uvicorn
 
@@ -51,6 +52,8 @@ app = FastAPI(
     description="Webhook receiver with video playback and timeline",
     version="2.0.0"
 )
+
+app.include_router(ptz_router)
 
 # CORS
 app.add_middleware(

@@ -1,7 +1,21 @@
 {
-  "name": "camera-viewer",
-  "version": "1.0.0",
-  "description": "Camera Recording Viewer - Desktop Application",
+  "name": "surveillance-viewer",
+  "version": "2.0.0",
+  "description": "Desktop application for viewing surveillance recordings and detection events",
+  "keywords": [
+    "surveillance",
+    "camera",
+    "nvr",
+    "shinobi",
+    "yolo",
+    "detection"
+  ],
+  "license": "MIT",
+  "author": {
+    "name": "Hovsep Shahoyan",
+    "email": "hovsep@aragats.am"
+  },
+  "type": "commonjs",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
@@ -11,18 +25,16 @@
     "build:win": "electron-builder --win",
     "build:mac": "electron-builder --mac"
   },
-  "author": "Camera System",
-  "license": "MIT",
+  "dependencies": {
+    "electron-store": "^8.1.0"
+  },
   "devDependencies": {
     "electron": "^28.0.0",
     "electron-builder": "^24.9.1"
   },
-  "dependencies": {
-    "electron-store": "^8.1.0"
-  },
   "build": {
-    "appId": "com.camera.viewer",
-    "productName": "Camera Viewer",
+    "appId": "com.surveillance.viewer",
+    "productName": "Surveillance Viewer",
     "directories": {
       "output": "dist"
     },
@@ -32,14 +44,24 @@
       "src/**/*"
     ],
     "linux": {
-      "target": ["AppImage", "deb"],
-      "category": "Video"
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Video",
+      "maintainer": "Hovsep Shahoyan <hovsep@aragats.am>"
     },
     "win": {
-      "target": ["nsis", "portable"]
+      "target": [
+        "nsis",
+        "portable"
+      ]
     },
     "mac": {
-      "target": ["dmg", "zip"]
+      "target": [
+        "dmg"
+      ]
     }
-  }
+  },
+  "homepage": "https://github.com/hovsep/surveillance-viewer"
 }
